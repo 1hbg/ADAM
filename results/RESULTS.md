@@ -225,3 +225,90 @@ Reproduce the complete matrix with:
 ```sh
 cargo run --release -p hss-bench -- run2b --alerts 1000
 ```
+
+## Test 3: SP1 verifiable-encryption statement
+
+### Result
+
+Run completed 2026-07-22 with SP1 6.3.1. The benchmark proves one synthetic
+ADAM alert per proof.
+
+| Mode | Repetitions | Mean (ms/alert) | Std. dev. (ms) | Min (ms) | Max (ms) | zkVM cycles |
+|---|---:|---:|---:|---:|---:|---:|
+| Execute (non-proving baseline) | 10 | 80.218 | 9.138 | 72.278 | 105.207 | 480,879 |
+| Mock prover, compressed mode | 3 | 78.940 | 2.954 | 75.739 | 82.866 | 480,879¹ |
+| CPU prover, compressed proof | 1 | 138,986.358 | N/A² | 138,986.358 | 138,986.358 | 480,879¹ |
+
+¹ Cycle count is SP1's total RISC-V instruction count from the execute report;
+the execution also reported 8,359 syscall events. Mock and real proving use the
+same ELF and witness. Syscall events are not added to instruction cycles.
+
+² One real proof was generated because this is the expensive feasibility
+measurement; variance cannot be estimated from `n=1`.
+
+| Artifact/phase | Absolute result |
+|---|---:|
+| Bincode-serialized `SP1Proof::Compressed` | 1,272,546 bytes |
+| Serialized proof bundle (proof, public values, SP1 metadata) | 1,272,994 bytes |
+| Serialized public values | 425 bytes |
+| CPU setup/proving-key generation, excluded from prove time | 1,681.026 ms |
+| Proof verification | 52.174 ms |
+
+The proof verified successfully. Key generation, synthetic input construction,
+signing, encryption, ELF build, and SP1 setup are outside the reported proving
+interval. Per-repetition SP1 stdin construction/serialization is inside it.
+The verification time excludes the separate public-value comparison.
+
+### Statement measured
+
+The guest checks the complete statement rather than only a schema version and
+length:
+
+1. Every fixed ADAM v1 field constraint is checked: nonzero 16-byte alert ID,
+   timestamp range, severity/category range, ASCII/nonempty text, and explicit
+   maximum lengths for user, machine, process, IP, and file path.
+2. SHA-256 of the full field/type/bound descriptor, including every checked
+   range and the bincode-1 serialization convention, must equal the committed
+   schema hash.
+3. A secp256k1 ECDSA signature over the bincode-1-serialized alert must verify
+   under the sensor public key. The key is a public value so a verifier can
+   compare it with its authorized synthetic sensor key.
+4. The guest enforces a 2048-bit modulus. Re-encrypting the private alert with
+   RSA-2048 OAEP-SHA256 and the private OAEP randomness must exactly reproduce
+   the public 256-byte ciphertext. The committed recipient-key hash binds the
+   statement to the RSA public key.
+5. The scoped nullifier is derived as
+   `SHA256("ADAM_SCOPED_NULLIFIER_V1" || org_secret || campaign_id || epoch)`.
+
+The private witness is the alert content, signature, OAEP randomness,
+organization secret, and RSA public-key preimage needed by the checks.
+The committed public values are the ciphertext, schema commitment, sensor
+public key, recipient-key hash, campaign ID, epoch, and nullifier. Host-side
+verification additionally checks those values against the expected synthetic
+statement.
+
+Negative unit tests reject malformed fields, a wrong schema commitment, an
+invalid signature, and a mismatched ciphertext, and verify that changing the
+scope cannot reproduce the expected nullifier.
+
+### Hardware and interpretation
+
+- Same secure E2B orb as Test 1: Linux 6.1.158, x86-64
+- Intel Xeon Processor at 2.60 GHz; 8 physical cores / 16 logical CPUs
+- 33,672,245,248 bytes RAM (31.36 GiB), no swap
+- Rust 1.97.1 host toolchain; SP1 6.3.1 Succinct guest toolchain
+- Local SP1 CPU prover; no network prover or accelerator
+
+The absolute result is **138.986 seconds and 1,272,546 bincode-serialized proof
+bytes per alert** on this CPU. That is a valid feasibility datapoint, not a
+production capacity claim:
+the implementation is measurement-only, unaudited research code, uses fixed
+synthetic inputs, and does not implement key authorization or lifecycle outside
+the proved statement.
+
+Reproduce with:
+
+```sh
+SP1_PROVER=cpu cargo run --release -p ve-circuit -- \
+  --execute-repetitions 10 --mock-repetitions 3 --real-repetitions 1
+```

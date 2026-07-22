@@ -1,9 +1,24 @@
 [package]
 name = "ve-circuit"
-version = "0.0.0"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
+build = "build.rs"
 
-[lib]
-path = "src/lib.rs"
+[dependencies]
+anyhow = "1"
+bincode = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+k256 = { version = "0.13.4", features = ["ecdsa"] }
+rand = "0.8"
+rand_chacha = "0.3"
+rsa = { version = "=0.9.6", features = ["sha2"] }
+sha2 = "0.10.8"
+sp1-sdk = "6.3.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+ve-circuit-types = { path = "types" }
+
+[build-dependencies]
+sp1-build = "6.3.1"

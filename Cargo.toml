@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/hss-bench",
     "crates/ve-circuit",
+    "crates/ve-circuit/program",
+    "crates/ve-circuit/types",
     "crates/oprf-eval",
 ]
 
@@ -10,3 +12,8 @@ members = [
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.85"
+
+[patch.crates-io]
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.2.0" }
+rsa = { git = "https://github.com/sp1-patches/RustCrypto-RSA", tag = "patch-0.9.6-sp1-6.2.0" }
+sha2-v0-10-8 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.8-sp1-6.2.0" }

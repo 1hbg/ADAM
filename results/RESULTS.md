@@ -312,3 +312,202 @@ Reproduce with:
 SP1_PROVER=cpu cargo run --release -p ve-circuit -- \
   --execute-repetitions 10 --mock-repetitions 3 --real-repetitions 1
 ```
+
+## Test 4: threshold-OPRF pseudonymisation quality
+
+### Threshold OPRF and token latency
+
+Run completed 2026-07-22. The harness uses a custom, non-RFC simulated 2-of-2
+additive-share base OPRF over Ristretto255: the client hashes the typed entity to
+the group and blinds it, each holder performs a separate scalar multiplication
+with its key share, and the client aggregates and unblinds before deriving a
+128-bit display token with SHA-256. It is not RFC 9497 VOPRF. The two holders are
+simulated in one process, so this is a cryptographic compute measurement, not
+network or holder-isolation latency.
+
+| Repetitions | Mean µs/token | Std. dev. (µs) | Min (µs) | Max (µs) |
+|---:|---:|---:|---:|---:|
+| 10,000 | 174.708 | 14.228 | 163.272 | 573.125 |
+
+Hardware: the same secure E2B orb used above—Intel Xeon Processor at 2.60 GHz,
+8 physical cores / 16 logical CPUs, 33,672,245,248 bytes RAM (31.36 GiB), Linux
+6.1.158, x86-64; Rust 1.97.1 release profile. The remote LLM hardware is unknown.
+
+The fixed research key produced the same token for the same typed input across
+different client blindings and separate program runs. Entity-type domain
+separation produced different tokens for equal strings in different fields.
+This deterministic key and RNG setup is for reproducible measurement only.
+
+| Cross-customer check under the shared threshold key | Result |
+|---|---:|
+| External IP `203.0.113.77` | identical token |
+| File hash `aaaa…aaaa` (64 hex characters) | identical token |
+| Private IP `10.0.0.8` | identical token |
+
+Under one fixed public research key, equal typed inputs produced equal tokens
+across different client blindings. This demonstrates functional shared-key
+determinism only; organization isolation, nondisclosure, and resistance to
+offline dictionary evaluation were not measured. The source-derived test key
+makes offline dictionary evaluation trivial and must never protect data. A real
+shared key would still create deliberate cross-customer linkability and the
+frequency risk measured below.
+
+### Synthetic corpus and LLM method
+
+The corpus contains exactly 30 synthetic Defender-like alerts: five each for
+credential dumping, lateral movement, phishing, data exfiltration, privilege
+escalation, and ransomware preparation. It includes LSASS/svchost paths,
+service and person accounts, RFC1918/public IPs, LOLBins, and signed Microsoft
+binaries. IDs, timestamps, relationships, command structure, PIDs, byte counts,
+and all other numeric fields remain unchanged.
+
+Full mode tokenizes users, machines, processes, parent processes, IPs, file
+paths, domains, and file hashes, including occurrences inside command lines and
+relationships. A local reverse table de-pseudonymizes the LLM answer. A raw-value
+audit over all 30 serialized full-mode alerts passed. Alert IDs, PIDs, byte counts,
+and timestamps were generated independently of attack technique so
+they cannot act as a label side channel. No raw customer data was used.
+
+For every alert, `moonshotai/kimi-k3` was called through OpenRouter once with
+the original and once with the fully pseudonymized alert. Hybrid was a third
+call. All 90 successful calls used the same prompt, model, temperature 0,
+reasoning disabled, and strict JSON categories. The technique ground truth was
+not serialized or sent to the model. Remote LLM hardware is unknown; this is a
+quality experiment, not an LLM latency benchmark.
+
+### Per-alert comparison
+
+`sev` and `tiltak` mean equality against original analysis A; action equality is
+exact canonical-set equality. All 60 B runs retained relationship count and all
+techniques matched A, so those repeated columns are omitted. No B run introduced
+a technique hallucination under the narrow ground-truth definition. Relationship
+count is a coarse metric (outputs were capped at three); it does not prove that
+relationship semantics were identical.
+
+| Alert | Technique A | Full B (technique; sev; tiltak) | Hybrid B (technique; sev; tiltak) |
+|---|---|---|---|
+| ALRT-107f575b25d06d7e | credential_dumping | credential_dumping; nei; ja | credential_dumping; ja; ja |
+| ALRT-0f42cc9b480bfb72 | credential_dumping | credential_dumping; ja; nei | credential_dumping; ja; nei |
+| ALRT-fbf014826e7393f7 | credential_dumping | credential_dumping; ja; ja | credential_dumping; ja; ja |
+| ALRT-51c7f36a84cf1165 | credential_dumping | credential_dumping; nei; nei | credential_dumping; ja; nei |
+| ALRT-42100265f8efa9b3 | credential_dumping | credential_dumping; nei; nei | credential_dumping; nei; nei |
+| ALRT-ff0f23d42b378c12 | lateral_movement | lateral_movement; ja; nei | lateral_movement; ja; nei |
+| ALRT-269d17353fb7b173 | lateral_movement | lateral_movement; ja; nei | lateral_movement; ja; ja |
+| ALRT-cb1c16e893597fba | lateral_movement | lateral_movement; ja; nei | lateral_movement; ja; nei |
+| ALRT-ed14887fd22401ae | lateral_movement | lateral_movement; ja; ja | lateral_movement; ja; ja |
+| ALRT-b6aa4c8626ea1953 | lateral_movement | lateral_movement; ja; ja | lateral_movement; ja; nei |
+| ALRT-38f6108988b5b27b | phishing | phishing; nei; nei | phishing; ja; ja |
+| ALRT-debb0ccf54f7fbc6 | phishing | phishing; ja; nei | phishing; ja; nei |
+| ALRT-b6c3c76f0a2c1d09 | phishing | phishing; ja; nei | phishing; ja; nei |
+| ALRT-d310d74e381412e0 | phishing | phishing; ja; nei | phishing; ja; nei |
+| ALRT-cb5d7325fd29fed7 | phishing | phishing; nei; nei | phishing; ja; nei |
+| ALRT-9d0de850bc1a86e2 | data_exfiltration | data_exfiltration; ja; nei | data_exfiltration; ja; nei |
+| ALRT-cba9df05368bdfc2 | data_exfiltration | data_exfiltration; ja; nei | data_exfiltration; ja; ja |
+| ALRT-2fd46add4c1d94cf | data_exfiltration | data_exfiltration; ja; nei | data_exfiltration; ja; ja |
+| ALRT-b901ff0c18aa7346 | data_exfiltration | data_exfiltration; ja; ja | data_exfiltration; ja; nei |
+| ALRT-1dded46d559ab85f | data_exfiltration | data_exfiltration; ja; ja | data_exfiltration; ja; ja |
+| ALRT-152879b19fdec80e | privilege_escalation | privilege_escalation; ja; nei | privilege_escalation; ja; nei |
+| ALRT-fa9f42b27ff58bf5 | privilege_escalation | privilege_escalation; ja; ja | privilege_escalation; ja; ja |
+| ALRT-1dda5036e8b8ab88 | privilege_escalation | privilege_escalation; ja; ja | privilege_escalation; ja; nei |
+| ALRT-b1ec6dd47c71b274 | privilege_escalation | privilege_escalation; ja; ja | privilege_escalation; ja; ja |
+| ALRT-96e77767110541d2 | privilege_escalation | privilege_escalation; ja; nei | privilege_escalation; ja; ja |
+| ALRT-e2e995f09de92a37 | ransomware_preparation | ransomware_preparation; ja; ja | ransomware_preparation; ja; ja |
+| ALRT-22dd4810e0321fbe | ransomware_preparation | ransomware_preparation; ja; ja | ransomware_preparation; ja; ja |
+| ALRT-7cd45aa1e8bf4bc8 | ransomware_preparation | ransomware_preparation; ja; ja | ransomware_preparation; ja; ja |
+| ALRT-6183a905754ef533 | ransomware_preparation | ransomware_preparation; ja; ja | ransomware_preparation; nei; nei |
+| ALRT-afbee8840d819303 | ransomware_preparation | ransomware_preparation; ja; ja | ransomware_preparation; nei; ja |
+
+| Quality measure against original A | Full B | Hybrid B |
+|---|---:|---:|
+| Same attack technique | 30/30 | 30/30 |
+| Same severity | 25/30 | 27/30 |
+| Exact same canonical action set | 14/30 | 15/30 |
+| Mean action-set Jaccard overlap | 0.794 | 0.843 |
+| Action-set Jaccard overlap ≥ 0.5 | 27/30 | 29/30 |
+| Same technique + severity + actions | 13/30 | 14/30 |
+| Fewer relationships | 0/30 | 0/30 |
+| Technique hallucination introduced by pseudonymisation | 0/30 | 0/30 |
+| Ground-truth technique accuracy | 30/30 | 30/30 |
+
+Original A ground-truth technique accuracy was also 30/30, so the comparison
+has a valid baseline rather than merely matching an inaccurate original answer.
+
+The primary result is positive but bounded: Kimi K3 retained the **attack
+technique and relationship count in 30/30** full-mode alerts. Severity matched
+in 25/30. Recommended actions matched exactly in 14/30, but average action-set
+overlap was 0.794 and 27/30 had at least 0.5 overlap. Exact equality is strict
+and does not distinguish a harmless extra containment step from a contradictory
+recommendation.
+
+### Hybrid result and leakage
+
+Hybrid mode additionally reveals service/person account class, RFC1918/public
+IP class, known system/LOLBin process basenames, and file basenames. Exact user,
+host, IP, directory, domain, and hash identities remain tokenized.
+
+Hybrid retained the same 30/30 techniques and relationship counts. In this
+single run it had higher agreement with A: severity 27/30 versus 25/30, exact
+actions 15/30 versus 14/30, and mean action overlap 0.843 versus 0.794. With one
+response per condition and no independent severity/action ground truth, these
+differences cannot be attributed causally to revealed semantics or interpreted
+as improved answer quality. Hybrid exposes process semantics (`lsass.exe`,
+`svchost.exe`, LOLBins and signed Microsoft binaries), service/person class,
+private/public IP class, and known basenames while exact identities stay hidden.
+
+### Frequency-analysis risk
+
+The harness first generated 5,000 actual OPRF tokens from six entities with
+probabilities 40%, 25%, 15%, 10%, 6%, and 4%, producing six distinct labels.
+It then ran 500 seeded Monte Carlo count trials of 5,000 observations; direct
+counts are rank-equivalent because OPRF labels are deterministic and 128-bit
+collisions are negligible here. An attacker was assumed to have a candidate
+dictionary and know the underlying rank prior. Ties count as failures.
+“Recovered at 95%” means at least 475/500 trials had the correct rank at that
+event count and every later count through 5,000 also met that threshold.
+
+| Rank inference | Observations required |
+|---|---:|
+| Most frequent entity (top 1), 95% of trials | 71 |
+| Exact ordered top 3, 95% of trials | 293 |
+
+Under this deliberately small and strongly skewed distribution, rank leakage
+appears quickly. The 293-event result is **not a universal safe rotation cutoff**:
+it depends on population size, skew, attacker knowledge, and workload. A time
+interval cannot be inferred without an event rate. Pilot policy must measure its
+own distribution and choose an event-count/key scope accordingly. Rotation also
+breaks cross-epoch matching, exposing a direct tradeoff between Collective
+correlation and frequency privacy.
+
+### Test 4 conclusion
+
+- Threshold OPRF compute is small on this host: **0.174708 ms/token**.
+- Shared-key cross-customer determinism works for external IP and file hash.
+- Full pseudonymisation preserved Kimi K3's technique result in **30/30** alerts,
+  severity in **25/30**, and relationship count in **30/30**.
+- Exact recommended-action sets only matched in **14/30**; downstream use must
+  not assume recommendation text is invariant under token substitution.
+- Hybrid had small single-run agreement deltas but disclosed additional semantic
+  classes; causality and quality improvement were not established.
+- Deterministic tokens expose frequency and equality; epoch/key scope must be an
+  explicit privacy-versus-correlation choice.
+
+This is unaudited, single-process research code. It does not implement DKG,
+malicious-share validation, verifiable partial evaluations, independent holder
+processes, key custody, or production side-channel protections.
+
+Reproduce the cryptographic measurements with:
+
+```sh
+cargo run --release -p oprf-eval -- oprf-only --repetitions 10000
+```
+
+Run the LLM matrix against an OpenAI-compatible endpoint with:
+
+```sh
+OPENROUTER_API_KEY=... cargo run --release -p oprf-eval -- run \
+  --llm-url https://openrouter.ai/api/v1/chat/completions \
+  --model moonshotai/kimi-k3 \
+  --output target/oprf-eval/raw.json \
+  --report target/oprf-eval/report.md \
+  --repetitions 10000
+```

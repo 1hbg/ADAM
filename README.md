@@ -18,7 +18,7 @@ All inputs are synthetic. Results, including hardware and variance, are kept in
 
 - `crates/hss-bench`: MORSE HSS primitive and synthetic alert benchmarks
 - `crates/ve-circuit`: SP1 verifiable-encryption measurement
-- `crates/oprf-eval`: reserved for the OPRF pseudonymisation experiment
+- `crates/oprf-eval`: threshold-OPRF pseudonymisation measurement experiment
 
 Only the measurement harness is in scope. Do not use this code to protect real
 data.

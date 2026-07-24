@@ -1345,3 +1345,145 @@ investigation's *span* against the epoch, not how many events it joins.
 python3 analysis/epoch_utility.py --trials 200000
 ```
 
+## Test 11: key-homomorphic PRF with epoch rotation
+
+The first real cryptography in this chain. Test 10 showed rotation trades
+leakage against investigative reach; rotation is only a usable lever if
+rotating is cheap, so this implements the primitive and measures it.
+
+### Construction
+
+Over Ristretto255, with `H` a hash-to-group (SHA-512 plus Elligator):
+
+```
+F(k, x) = k * H(x)
+```
+
+Key homomorphism, in the sense of Boneh, Lewi, Montgomery and Raghunathan
+(CRYPTO 2013): `F(k1 + k2, x) = F(k1, x) + F(k2, x)`.
+
+Epoch rotation follows the updatable-tokenisation construction of Cachin,
+Camenisch, Freire-Stoegbuchner and Lehmann (eprint 2017/695). The update tweak
+for epoch e to e+1 is the **multiplicative** scalar `delta = k_new * k_old^-1`,
+so a stored token rotates as `t' = delta * t`. **The party holding the token
+store needs neither the preimage nor either key** — that is what makes rotation
+operationally possible, and it is why the tweak is multiplicative rather than
+the additive form the key homomorphism above would suggest.
+
+### Correctness
+
+| Check | Result |
+|---|---|
+| `F(k1+k2, x) == F(k1, x) + F(k2, x)` | pass |
+| One rotation equals fresh derivation under the new key | pass |
+| A chain of 8 rotations equals fresh derivation under the final key | pass |
+| Tokens differ across epochs | pass |
+| Deterministic within an epoch | pass |
+
+The rotation chain matters more than the single step: it is what lets a store
+survive many epochs without ever being re-derived from plaintext.
+
+### Derivation throughput
+
+| Operation | Per item | Items/s | Mean over 200,000 items |
+|---|---:|---:|---:|
+| derive, single thread | 55.688 us | 17,957 | 11137.6 ms |
+| derive, all threads | 25.191 us | 39,696 | 5038.3 ms |
+| hash-to-curve only, single thread | 10.540 us | 94,880 | 2107.9 ms |
+
+Hash-to-group is 10.5 us of the 55.7 us derivation, so the variable-base scalar
+multiplication is about 45 us and dominates. Four threads give 2.21x on 4 cores.
+
+### Rotation cost
+
+| Tokens | In-memory, single thread¹ | Stored, all threads | Per token (all threads) |
+|---:|---:|---:|---:|
+| 10,000 | 0.425 s | 0.187 s | 18.673 us |
+| 100,000 | 4.176 s | 1.842 s | 18.421 us |
+| 1,000,000 | 42.310 s | 18.874 s | 18.874 us |
+| 10,000,000 | — | 176.3 s | 17.625 us |
+| 100,000,000 | — | 1763 s (projected²) | 17.625 us |
+
+¹ The single-thread column measures in-memory points without the
+compress/decompress round trip, so it is not directly comparable to the stored
+column; it is shown to expose the thread scaling.
+
+² **Projected, not measured.** Per-token cost is flat to within 7% across 10⁴
+to 10⁷ (18.67, 18.42, 18.87, 17.63 us), because the rotations are independent
+scalar multiplications with no shared state, so the 10⁸ figure is the 10⁷
+measurement times ten. Building a 10⁸ store to measure it directly was not
+worth roughly half an hour of derivation on this box.
+
+**Rotation is not cheaper than derivation per token.** Both are one
+variable-base scalar multiplication; rotation saves only the ~10.5 us
+hash-to-group. Its advantage is categorical, not numerical: it needs neither
+the plaintext nor the key. Budgeting rotation as a cheap background operation
+because it is "just a tweak" would be wrong by about a factor of five.
+
+### Memory
+
+| Tokens | Stored tokens | Process RSS | Bytes per token |
+|---:|---:|---:|---:|
+| 10,000 | 320,000 B | 25,464,832 B | 32 |
+| 100,000 | 3,200,000 B | 37,703,680 B | 32 |
+| 1,000,000 | 32,000,000 B | 76,902,400 B | 32 |
+| 10,000,000 | 320,000,000 B | 396,906,496 B | 32 |
+| 100,000,000 | 3,200,000,000 B (arithmetic) | — | 32 |
+
+A compressed Ristretto point is exactly 32 bytes, so the store is exactly
+`32 x tokens`; the 10⁸ row is arithmetic, not measured. Process RSS runs above
+the store because the measurement also holds uncompressed point
+representations (an in-memory `RistrettoPoint` is 160 bytes) and the rotation
+output vector.
+
+### What this means together with Test 10
+
+Test 10 argued for short epochs on leakage grounds and long ones on
+investigative grounds. Test 11 adds a third axis, and it points the same way as
+utility:
+
+| Epoch | Rotations/day | 10⁸-token rotation per epoch | Share of epoch spent rotating |
+|---|---:|---:|---:|
+| 1h | 24 | ~29 min | ~49% |
+| 6h | 4 | ~29 min | ~8% |
+| 24h | 1 | ~29 min | ~2.0% |
+| 7d | 1/7 | ~29 min | ~0.29% |
+
+On these four cores, hourly rotation of a 10⁸-token store would spend roughly
+half of every epoch rotating. That is a provisioning problem rather than a wall
+— the work is embarrassingly parallel and would fall to minutes on a larger
+machine — but it means hourly rotation at that scale is a capacity decision,
+not a configuration flag. At 24 hours it is under 2% of the epoch and
+operationally uninteresting.
+
+### Hardware
+
+**Different hardware from Tests 1–4; these numbers are not comparable to
+those.**
+
+- Intel Xeon Processor at 2.80 GHz, 4 cores, 1 thread/core, 1 socket
+- 16,856,244,224 bytes RAM (15.70 GiB)
+- Linux 6.18.5, x86-64; Rust 1.94.1, release profile
+- curve25519-dalek 4.1.3
+- The workspace patches `sha2` to the SP1 fork
+  (`patch-sha2-0.10.8-sp1-6.2.0`) for the Test 3 guest; the host build of that
+  fork is what the hash-to-group figure measures
+
+### Limits
+
+1. **Unaudited research code for measurement only.** No key custody, no DKG, no
+   threshold distribution of the key, no protocol around the primitive, and no
+   constant-time guarantees beyond what curve25519-dalek provides.
+2. **Single-process, single-machine.** Rotating a real store means reading and
+   writing it; this measures only the cryptography. At 3.2 GB per full pass the
+   I/O would plausibly dominate.
+3. **The 10⁸ figures are projections**, flagged above.
+4. **Security definitions are cited, not verified.** This measures the
+   construction's cost and asserts none of the UTO security properties.
+
+### Reproduce
+
+```sh
+cargo run --release -p khprf-bench -- \
+  --derive 200000 --rotate 10000,100000,1000000,10000000 --repetitions 5
+```

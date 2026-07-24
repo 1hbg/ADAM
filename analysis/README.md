@@ -49,3 +49,70 @@ python3 analysis/ngram_cost.py --corpus /tmp/sigma --input-corpus /tmp/art
 
 No cryptography is involved: this measures the tokenisation, which bounds any
 scheme built on it, not a scheme.
+
+## `freq_attack.py` — Test 8
+
+Turns the Test 7 skew measurement into an attack number: how many observations
+an attacker needs before she can say which command line is behind an observed
+token set. Separates an uninformed attacker (public dictionary only) from an
+informed one (also knows the victim's execution frequencies), and reports
+linkage separately from identification.
+
+Tokens are modelled as a secret random relabelling of the n-gram space. The
+attacker code touches only token identity and frequency, never the underlying
+string — including for tie-breaking, which would otherwise smuggle plaintext
+order into the attack.
+
+```sh
+python3 analysis/freq_attack.py --input-corpus /tmp/art --zipf 0.8 1.0 1.2
+```
+
+The victim frequency distribution is **synthetic** (Zipf), because no public
+corpus carries command execution frequencies, and the sensitivity sweep shows
+it dominates the answer. Runs for tens of minutes.
+
+## `mitigation.py` — Test 9
+
+The cost/leakage curve for defending that index: size padding and frequency
+padding, measured as index-size multiplier against residual identification.
+Re-runs the Test 8 attack against each padded index.
+
+The attacker is assumed to know the defence but not the secret padding, which
+determines what she can still rule out by observed set size. Scoring a padded
+index against exact-size buckets would credit the defence with hiding something
+she never needed — see the candidate models at the top of the file.
+
+```sh
+python3 analysis/mitigation.py --input-corpus /tmp/art --n 4 \
+  --trials 10 --observations 10000
+```
+
+The traffic-identification metric is heavy-tailed under Zipf — a handful of
+frequent lines carry most of it — so it needs many trials to stabilise. Ten is
+not enough; see the Test 9 writeup.
+
+## `epoch_utility.py` — Test 10
+
+Simulates how much investigative work survives token rotation at 1h / 6h / 24h
+/ 7d. No cryptography and no corpus: the investigation-span distribution is
+**synthetic**, a three-component lognormal mixture, and the writeup reports the
+result against a sensitivity sweep rather than the central case alone.
+
+```sh
+python3 analysis/epoch_utility.py --trials 200000
+```
+
+## `sketch_compression.py` — Test 12
+
+Measures how far security telemetry compresses under Count-Min and HyperLogLog
+sketching before it reaches HSS, as compression ratio against precision loss on
+realistic aggregation questions. Both sketches are textbook implementations
+written for measurement, not optimised or hardened.
+
+```sh
+python3 analysis/sketch_compression.py --input-corpus /tmp/art --events 200000
+```
+
+The event stream is **synthetic**: command lines come from Atomic Red Team, but
+entity cardinalities and the Zipf skew are modelling assumptions, and the
+compression ratio depends directly on them.

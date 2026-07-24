@@ -1952,6 +1952,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "khprf-bench"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "curve25519-dalek",
+ "rand 0.8.7",
+ "rand_chacha",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "konst"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"

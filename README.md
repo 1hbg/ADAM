@@ -21,7 +21,8 @@ not vendored here. Results, including hardware and variance, are kept in
 - `crates/hss-bench`: MORSE HSS primitive and synthetic alert benchmarks
 - `crates/ve-circuit`: SP1 verifiable-encryption measurement
 - `crates/oprf-eval`: threshold-OPRF pseudonymisation measurement experiment
-- `analysis/`: corpus analyses that are not primitive benchmarks
+- `crates/khprf-bench`: key-homomorphic PRF epoch-rotation measurement
+- `analysis/`: corpus analyses and simulations that are not primitive benchmarks
 
 Only the measurement harness is in scope. Do not use this code to protect real
 data.

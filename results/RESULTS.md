@@ -1,7 +1,11 @@
 # ADAM research results
 
-Only absolute measurements belong here. All data used by the experiments is
-synthetic.
+Only absolute measurements belong here. Data for the benchmark experiments
+(Tests 1–4) is synthetic. The corpus analyses (Tests 5 onward) use public
+corpora, cloned separately and not vendored; where those tests still need a
+distribution that no public corpus carries — such as command execution
+frequency in Test 8 — the assumed model is marked synthetic at the point of
+use.
 
 ## Test 1: MORSE HSS throughput
 
@@ -918,4 +922,160 @@ Test 4 OPRF frequency result, at a finer granularity.
 git clone --depth 1 https://github.com/SigmaHQ/sigma.git /tmp/sigma
 git clone --depth 1 https://github.com/redcanaryco/atomic-red-team.git /tmp/art
 python3 analysis/ngram_cost.py --corpus /tmp/sigma --input-corpus /tmp/art
+```
+
+## Test 8: frequency attack against the n-gram index
+
+Test 7 measured that the n-gram frequency distribution is Zipf-like but
+deliberately stopped short of turning skew into an attack number. This closes
+that loop in the same shape as the Test 4 OPRF frequency analysis.
+
+### Threat model
+
+The index stores, per field, the set of tokens of its n-grams. Tokens are
+deterministic: the same n-gram always yields the same token, globally. The
+attacker sees token sets and nothing else, and breaks no primitive — everything
+below follows from determinism plus skew. Tokens are modelled as a secret
+random relabelling of the n-gram space, which is what a PRF-based scheme
+provides. The attacker code touches only token identity and token frequency,
+never the underlying string, including for tie-breaking.
+
+Two capability levels are separated:
+
+- **Uninformed** — holds the public dictionary of candidate command lines but
+  no knowledge of how often the victim runs each. This is the realistic
+  baseline, because the dictionary here is a public repository.
+- **Informed** — additionally knows the victim's execution-frequency
+  distribution. This is the upper bound on what frequency knowledge buys.
+
+Execution frequencies do not exist in any public corpus, so the victim
+distribution is **synthetic**: Zipf(s) over command lines in randomised rank
+order. Sensitivity to s is reported and turns out to dominate everything else.
+Corpus and pins are the Test 7 ones; 20 trials per point, seed 20260724.
+
+### Population and ceiling
+
+| n | Distinct lines | n-gram vocabulary | Indistinguishable classes | Ceiling |
+|---:|---:|---:|---:|---:|
+| 3 | 4,844 | 22,073 | 4,844 | 100.0% |
+| 4 | 4,839 | 50,550 | 4,839 | 100.0% |
+| 5 | 4,827 | 76,663 | 4,827 | 100.0% |
+
+No two distinct command lines share an n-gram set at any n, so nothing is
+hidden by collision: perfect identification is possible in principle, and the
+measured rates below are not capped by the corpus.
+
+### Linkage is free
+
+Because tokens are deterministic, two executions of the same command line
+produce byte-identical token sets. An attacker can therefore say "these two
+records are the same command" with **zero background knowledge and two
+observations**, at every n. This needs no frequency analysis and no dictionary,
+and no amount of observation is required beyond the second. Identification —
+saying *which* command — is the part that needs more, and is what the rest of
+this section measures.
+
+### The set-size fingerprint, at one observation
+
+|token set| equals |n-gram set|, which the attacker computes for every public
+candidate. This needs no frequency knowledge and a single observation.
+
+| n | Classes with globally unique size | Median candidates after size filter | Largest bucket |
+|---:|---:|---:|---:|
+| 3 | 48 (0.9909%) | 14 | 66 |
+| 4 | 45 (0.9299%) | 13 | 71 |
+| 5 | 57 (1.1809%) | 13 | 78 |
+
+Size alone rarely identifies — about 1% of records — but it narrows roughly
+4,840 candidates to a median of 13–14 from a single observation, a ~370x
+reduction, for free. That floor matters for reading the next table.
+
+### Identification versus observations
+
+Zipf s=1.0. "Traffic" is the share of observations identified, which is
+dominated by frequent lines; "distinct" is the share of distinct lines seen.
+
+| n | Attacker | N=10 | N=10² | N=10³ | N=10⁴ | N=10⁵ | Observations for 50% of traffic |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 3 | uninformed | 4.0% | 4.25% | 5.355% | 5.979% | 5.4479% | not reached |
+| 3 | informed | 22.0% | 31.4% | 37.38% | 57.1195% | 80.6336% | 4358 |
+| 4 | uninformed | 6.5% | 5.9% | 7.28% | 8.1475% | 7.8868% | not reached |
+| 4 | informed | 8.5% | 22.85% | 37.36% | 50.7295% | 68.3142% | 8819 |
+| 5 | uninformed | 2.5% | 4.0% | 4.11% | 4.8015% | 5.4136% | not reached |
+| 5 | informed | 20.5% | 29.75% | 39.14% | 51.3705% | 66.7653% | 7726 |
+
+Neither attacker reaches 90% of traffic within 10⁵ observations at s=1.0.
+
+**The uninformed attacker's frequency attack fails.** It plateaus at 5–8% of
+traffic no matter how long it observes, which is approximately the 1-in-13
+floor the size fingerprint already provides. Ranking tokens by document
+frequency in the public dictionary does not survive contact with a skewed
+victim distribution: recovered token→n-gram accuracy stays at 0.01–0.19%.
+
+**The informed attacker succeeds, and succeeds on the traffic that matters
+first.** At n=3 she identifies 22% of traffic from 10 observations and 80.6%
+from 10⁵, while only reaching 69.4% of *distinct* lines — she de-anonymises
+frequent commands early and rare ones late, exactly the pattern Test 4 found
+for OPRF tokens. Her token map is still poor in absolute terms (0.74%
+unweighted at best) but occurrence-weighted accuracy reaches 21.2%, and that
+is what the overlap scoring uses.
+
+### Sensitivity to the assumed skew
+
+Observations for the informed attacker to reach 50% of traffic:
+
+| n | s=0.8 | s=1.0 | s=1.2 |
+|---:|---:|---:|---:|
+| 3 | 30,717 | 4,358 | 101 |
+| 4 | 42,839 | 8,819 | 296 |
+| 5 | 80,086 | 7,726 | 144 |
+
+**This is the most important number in the test, and it is not a property of
+the index.** The threshold moves by nearly three orders of magnitude — from 101
+to 80,086 observations — purely from the assumed traffic skew. The uninformed
+attacker moves the other way, getting *worse* as skew rises (9.3% → 3.0% of
+traffic at n=3), because a uniform prior is more wrong the more skewed reality
+is.
+
+Choice of n barely matters by comparison. n=3 is consistently the most
+vulnerable, but the n=3-to-n=5 spread is small next to the s=0.8-to-s=1.2
+spread.
+
+### Interpretation and limits
+
+1. **These are lower bounds on leakage, not upper bounds.** The measured attack
+   is a frequency attack, the Test 4 analogue that this test set out to run. It
+   is not the strongest available. Recovered token-map accuracy is very low
+   (≤0.74% unweighted), which means most of the identification comes from the
+   size filter plus a handful of high-frequency tokens — a structural attack
+   using token co-occurrence across records, or iterative constraint
+   propagation seeded from confidently-mapped tokens, would do materially
+   better. That attack was not implemented and is not measured here. **Nothing
+   in this section should be read as evidence that the index is safe against
+   the uninformed attacker;** it is evidence that one specific attack fails.
+2. **The frequency model is synthetic and dominates the result.** Zipf over
+   command lines is an assumption, not a measurement, and the sensitivity table
+   shows the answer is mostly determined by it. A deployment must measure its
+   own command-line distribution before quoting any observation count.
+3. **The population is a public attack corpus.** 4,840 distinct Atomic Red Team
+   lines is far smaller and far less diverse than a real environment's command
+   line population. A larger population makes identification harder per
+   observation but does not remove the linkage result, which is
+   population-independent.
+4. Inherited from Test 7: static, unweighted pattern extraction, lowercased.
+
+For ADAM: the load-bearing finding is not an observation count, because that
+number is mostly an artifact of the assumed skew. It is that **linkage is
+unconditional and free** — deterministic tokens make repeated identical
+commands visible as repeats to anyone who can see the index, with no
+background knowledge and no frequency analysis at all. That property does not
+depend on the traffic distribution, cannot be tuned away with a larger n, and
+is the same structural weakness Test 4 found in deterministic OPRF tokens.
+Test 9 measures what removing it costs.
+
+### Reproduce
+
+```sh
+git clone --depth 1 https://github.com/redcanaryco/atomic-red-team.git /tmp/art
+python3 analysis/freq_attack.py --input-corpus /tmp/art --zipf 0.8 1.0 1.2
 ```

@@ -511,3 +511,173 @@ OPENROUTER_API_KEY=... cargo run --release -p oprf-eval -- run \
   --report target/oprf-eval/report.md \
   --repetitions 10000
 ```
+
+## Test 5: operation distribution in detection content
+
+This test is a static analysis of public detection rules, not a benchmark and
+not a cryptographic measurement. It asks how detection work splits between
+matching (join/lookup) and numeric computation, because MORSE HSS is cheap for
+addition and linear work and expensive for matching. The ratio bounds how much
+of a detection workload that primitive could serve at all.
+
+Unlike Tests 1–4 the input is not synthetic: it is the public SigmaHQ corpus.
+
+### Method
+
+Run completed 2026-07-24 against SigmaHQ/sigma at commit
+`5e969bc529d1bca15d33f4ded100290a2a1a6f4c` (2026-07-24), analysed with Python
+3.11.15 and PyYAML 6.0.1. The corpus was cloned outside this repository and is
+not vendored here.
+
+The **counting unit is one field predicate**, not one rule and not one literal
+value: `CommandLine|contains: [a, b, c]` is one set-membership lookup, not
+three. A sensitivity check using a per-literal-value denominator is reported
+below. Operations are classified as:
+
+- **Join/lookup:** equality, `contains`, `startswith`, `endswith`, `re`,
+  `cidr`, `fieldref`, `exists`, unstructured keyword search, aggregation
+  group-by keys, and `near` temporal correlation.
+- **Numeric:** `gt`/`gte`/`lt`/`lte` comparisons, aggregation functions
+  (`count`, `sum`, `min`, `max`, `avg`), aggregation thresholds, and
+  `timeframe` windows.
+- **Other**, held outside the denominator and reported separately: boolean
+  condition logic, `N of`/`all of` quantifiers, and encoding transforms
+  (`base64`, `base64offset`, `wide`, `utf16`) counted as a decode step
+  distinct from the comparison that follows it.
+
+Per the experiment definition the result is **unweighted**. No rule execution
+frequency data was available, so every rule contributes equally regardless of
+how often it would fire in production.
+
+### Result: supported corpus
+
+The supported corpus is `rules`, `rules-compliance`, `rules-dfir`,
+`rules-emerging-threats`, and `rules-threat-hunting`. All 3,755 rules parsed
+with **0 parse errors**.
+
+| Class | Operations | Share of classified |
+|---|---:|---:|
+| Join/lookup | 12,411 | 100.0000% |
+| Numeric computation | 0 | 0.0000% |
+| **Classified denominator** | **12,411** | **100%** |
+| Other (excluded from denominator) | 4,381 | n/a |
+| Total operations | 16,792 | n/a |
+
+The numeric count is exactly zero. That was verified independently of the
+parser: the supported corpus contains no `|gt`/`|gte`/`|lt`/`|lte` modifier,
+no pipe aggregation in any `condition`, and no `detection.timeframe` key. Three
+supported rules contain the string "timeframe" in prose description text only.
+
+Composition of the 12,411 join/lookup operations, and of the 4,381 excluded:
+
+| Operation | Count | Operation | Count |
+|---|---:|---|---:|
+| `contains` | 4,601 | boolean logic (`and`/`or`/`not`) | 2,390 |
+| `endswith` | 3,417 | boolean quantifier (`N of`) | 1,979 |
+| equality (string) | 2,891 | `base64offset` decode | 9 |
+| equality (numeric-valued field) | 597 | `wide` decode | 2 |
+| `startswith` | 555 | `base64` decode | 1 |
+| `re` | 201 | | |
+| keyword (unstructured) | 107 | | |
+| `cidr` | 39 | | |
+| `fieldref` | 3 | | |
+
+Equality against a numeric-valued field (`EventID: 4624`, 597 operations) is
+counted as a lookup, not arithmetic: it is a comparison against a constant with
+no computation. It is broken out above so a reader can audit that call.
+
+### Breakdown by rule category
+
+The three requested slices are disjoint in this corpus — no rule falls into more
+than one — and 1,530 supported rules fall into none of them.
+
+| Slice | Rules | Join/lookup | Numeric | Numeric share | Other |
+|---|---:|---:|---:|---:|---:|
+| `process_creation` | 1,628 | 5,836 | 0 | 0.0000% | 2,276 |
+| network | 294 | 1,068 | 0 | 0.0000% | 294 |
+| cloud | 303 | 578 | 0 | 0.0000% | 61 |
+
+Slice definitions: `process_creation` is `logsource.category`; network is
+`logsource.category` in {`network_connection`, `dns_query`, `dns`, `firewall`,
+`proxy`, `webserver`, `netflow`, `zeek`} or a `network/` path component; cloud
+is `logsource.product`/`service` in a cloud-provider set or a `cloud/` path
+component.
+
+**The match/arithmetic split does not vary between categories: it is 100%/0% in
+all three.** What varies is the kind of matching, which is a different result
+than the one this test set out to measure:
+
+| Slice | Substring (`contains`/`startswith`/`endswith`) | Exact equality | Regex | CIDR |
+|---|---:|---:|---:|---:|
+| `process_creation` | 81.6% | 16.8% | 1.6% | 0.0% |
+| network | 55.5% | 37.9% | 0.7% | 3.2% |
+| cloud | 12.3% | 86.5% | 0.3% | 0.0% |
+
+Cloud rules are overwhelmingly flat equality against structured API fields.
+`process_creation` rules are dominated by substring matching over command-line
+strings. Both are lookups, but they are not equally expensive to make private:
+exact equality is the case an OPRF or encrypted index handles well, and
+substring matching over attacker-controlled free text is the case it does not.
+
+### Where the arithmetic actually is
+
+Every aggregation rule in the corpus lives in `unsupported/`, which SigmaHQ
+excludes from the supported rule set. This is the only place numeric operations
+appear at all:
+
+| Class | Operations | Share of classified |
+|---|---:|---:|
+| Join/lookup | 286 | 67.2941% |
+| Numeric computation | 139 | 32.7059% |
+| **Classified denominator** | **425** | **100%** |
+| Other (excluded) | 77 | n/a |
+| Total operations | 502 | n/a |
+
+87 unsupported rules parsed; 53 of them actually aggregate. The 139 numeric
+operations are 47 `timeframe` windows, 46 thresholds, 44 `count()` calls, and
+2 `sum()` calls. Their logsource categories are `process_creation` (6), `dns`
+(5), `firewall` (3), `ps_script` (2), and one each of `webserver`,
+`image_load`, and `dns_query`.
+
+### Sensitivity to the counting unit
+
+Recounting with every literal value as its own operation instead of every field
+predicate changes the magnitude but not the conclusion: 46,082 join/lookup
+operations against 0 numeric operations in the supported corpus. The result is
+not an artifact of treating a value list as a single set-membership test.
+
+### Interpretation and limits
+
+The headline number is real but it must not be read as "detection work contains
+no arithmetic". Three limits bound it, and the first is severe:
+
+1. **The corpus is partly measuring the Sigma language, not detection
+   practice.** Sigma's supported specification deliberately excludes
+   aggregation; the aggregating rules were moved to `unsupported/`. A detection
+   engineer who wants a rate or a threshold does not write it in supported
+   Sigma, so the zero is partly definitional. Statistical, UEBA, and
+   beaconing-style detections are out of scope of this corpus by construction,
+   and those are exactly the detections that would be arithmetic-heavy. This
+   measurement therefore establishes the distribution **for signature-style
+   detection content expressed in Sigma**, and nothing wider.
+2. **Static, not runtime.** These are the operations a rule declares, not the
+   operations a SIEM backend executes. A backend performs its own indexing,
+   grouping, and scan work per event that no rule text mentions.
+3. **Unweighted.** Without execution frequency data, a rule that fires
+   constantly counts the same as one that never fires.
+
+For ADAM specifically: within this corpus, the arithmetic capability that MORSE
+HSS provides cheaply addresses 0 of 12,411 operations, and the substring
+matching that dominates `process_creation` is the hardest case for any
+encrypted-lookup approach. That is a genuine negative signal for applying an
+arithmetic-oriented primitive directly to signature detection content. It is
+not evidence about the alert-scoring workload measured in Tests 1 and 2B, which
+is thresholding over already-extracted numeric features — an arithmetic
+workload that this corpus does not describe and this test does not measure.
+
+### Reproduce
+
+```sh
+git clone --depth 1 https://github.com/SigmaHQ/sigma.git /tmp/sigma
+python3 analysis/op_distribution.py --corpus /tmp/sigma
+```

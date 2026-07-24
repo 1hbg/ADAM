@@ -681,3 +681,241 @@ workload that this corpus does not describe and this test does not measure.
 git clone --depth 1 https://github.com/SigmaHQ/sigma.git /tmp/sigma
 python3 analysis/op_distribution.py --corpus /tmp/sigma
 ```
+
+## Test 6: operation distribution in the unsupported Sigma corpus
+
+Test 5 found that all aggregation in the Sigma corpus lives in `unsupported/`.
+This is the same parser, the same classification, and the same table form
+pointed at that directory, to see whether the match/arithmetic split varies by
+category once arithmetic is permitted at all. Same corpus pin as Test 5.
+
+| Slice | Rules | Join/lookup | Numeric | Join share | Numeric share | Other |
+|---|---:|---:|---:|---:|---:|---:|
+| Whole `unsupported/` corpus | 87 | 286 | 139 | 67.2941% | 32.7059% | 77 |
+| `process_creation` | 9 | 34 | 9 | 79.0698% | 20.9302% | 14 |
+| network | 15 | 36 | 36 | 50.0000% | 50.0000% | 14 |
+| cloud | 9 | 25 | 21 | 54.3478% | 45.6522% | 3 |
+
+33 of the 87 rules fall into one of the three slices; the slices are disjoint.
+Numeric operations by kind: `timeframe` windows and `count()` calls dominate,
+with `sum()` appearing only in the network slice (2 operations).
+
+**The split does vary by category here, unlike in Test 5.** Network rules are
+the most arithmetic-heavy at 50.0%, cloud next at 45.7%, and `process_creation`
+least at 20.9%. That ordering is plausible — rate and volume thresholds are
+natural for DNS, firewall, and API-call telemetry, and unnatural for individual
+process launches — but it rests on very few rules.
+
+**These percentages are fragile and should not be quoted as rates.** The slice
+denominators are 43, 72, and 46 operations drawn from 9, 15, and 9 rules. A
+single rule changes any of them by several percentage points. The corpus is
+also unsupported by definition: these rules were removed from the maintained
+set, so they describe what Sigma authors once wrote, not current practice. Test
+6 establishes that arithmetic-heavy detection content exists and is
+category-dependent; it does not measure how much.
+
+Reproduce with the Test 5 command; the `unsupported_slices` key holds this
+table.
+
+## Test 7: can substring search be expressed as a set operation?
+
+Test 5 found that substring matching dominates the `process_creation` (81.6%)
+and network (55.5%) slices, and that it is the hardest case for any encrypted
+lookup. The standard way to turn a substring query into a set operation is
+n-gram tokenisation: store the set of n-grams of each field, and answer a query
+by testing whether the query's n-gram set is contained in the field's.
+
+This test measures what that transformation costs. **No cryptography is
+involved** — this measures the tokenisation itself, which bounds any scheme
+built on it.
+
+### Method
+
+Run completed 2026-07-24. Patterns come from SigmaHQ/sigma at the Test 5 commit
+`5e969bc529d1bca15d33f4ded100290a2a1a6f4c`, extracted with the Test 5 parser.
+Input command lines come from redcanaryco/atomic-red-team at commit
+`1ba1dd8d9ce6f74700f7aec2e60de5632f667f03` (2026-07-19), with `#{...}` input
+arguments replaced by their declared defaults and each executor command block
+split into lines, because a process `CommandLine` field holds one line rather
+than a whole script.
+
+| Corpus | Extent |
+|---|---:|
+| Substring pattern occurrences (process_creation + network) | 22,685 |
+| Unique patterns | 14,726 |
+| — `contains` | 12,254 |
+| — `endswith` | 2,309 |
+| — `startswith` | 163 |
+| Unique patterns on CommandLine-like fields | 11,171 |
+| Input command lines | 6,110 |
+| Atomic tests contributing them | 1,801 |
+
+All strings are lowercased, because Sigma matching is case-insensitive by
+default. That is the faithful model and it also increases n-gram collisions.
+Anchored patterns (`startswith`/`endswith`) are reported separately from
+unanchored `contains` throughout.
+
+The set model is **complete but not sound**: if P is a substring of S then every
+n-gram of P is an n-gram of S, so the filter never misses a true match, but the
+converse fails. This was verified empirically as well as argued — over 7,123
+true substring occurrences the filter produced 0 misses. The filter's exact
+positive set was also cross-checked against a naive subset test over a 400
+pattern × 600 input sample at all three n, with identical counts.
+
+### 1. Inflation
+
+Per pattern, over expressible patterns only:
+
+| n | Mean n-grams | Median | p95 | Max |
+|---:|---:|---:|---:|---:|
+| 3 | 14.21 | 10 | 41 | 176 |
+| 4 | 13.64 | 9 | 41 | 175 |
+| 5 | 13.82 | 9 | 41 | 174 |
+
+Per input field — the number of tokens that must actually be stored per
+command line:
+
+| n | Mean positions | Median | p95 | Max | Mean distinct | Median distinct |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 68.38 | 55 | 157 | 1,493 | 60.25 | 51 |
+| 4 | 67.47 | 54 | 156 | 1,492 | 61.53 | 51 |
+| 5 | 66.77 | 54 | 155 | 1,491 | 62.12 | 51 |
+
+**Inflation is approximately one token per character of stored field, and it is
+essentially independent of n.** A median 55-character command line becomes
+51 distinct stored tokens. Raising n does not reduce the index size; it only
+shifts which tokens are stored. Any per-token cost in an encrypted index is
+therefore multiplied by roughly the field length, not by a small constant.
+
+### 2. Patterns shorter than n
+
+| n | Inexpressible | Share of unique patterns | `contains` | `endswith` | `startswith` |
+|---:|---:|---:|---:|---:|---:|
+| 3 | 2,525 | 17.15% | 2,503 | 21 | 1 |
+| 4 | 2,906 | 19.73% | 2,803 | 100 | 3 |
+| 5 | 3,921 | 26.63% | 3,654 | 257 | 10 |
+
+At n=5 more than a quarter of the pattern set cannot be expressed at all. These
+are not marginal patterns — short `contains` fragments such as flag strings and
+short path components are ordinary detection content. A deployment would have
+to fall back to some other mechanism for them, which is the point at which the
+privacy property of the whole index is at risk of being lost.
+
+### 3. Frequency distribution of distinct n-grams
+
+This is the leakage measure. An encrypted n-gram index reveals which token is
+being touched, so the shape of this distribution bounds what an observer learns
+without breaking anything. Measured over the input corpus, which is where the
+leakage sits; the pattern side is secondary.
+
+| n | Distinct n-grams | Occurrences | Top 100 share of occurrences | Top 100 as share of distinct | n-grams covering 50% | covering 90% |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 22,073 | 399,435 | 19.07% | 0.45% | 583 (2.64%) | 5,418 (24.5%) |
+| 4 | 50,550 | 393,594 | 13.28% | 0.20% | 1,556 (3.08%) | 19,683 (38.9%) |
+| 5 | 76,663 | 387,760 | 10.60% | 0.13% | 2,938 (3.83%) | 37,887 (49.4%) |
+
+| n | Hapax n-grams | Hapax share | Entropy (bits) | Max entropy | Normalised |
+|---:|---:|---:|---:|---:|---:|
+| 3 | 7,843 | 35.53% | 11.8977 | 14.4300 | 0.8245 |
+| 4 | 22,375 | 44.26% | 13.3745 | 15.6254 | 0.8559 |
+| 5 | 39,060 | 50.95% | 14.2207 | 16.2262 | 0.8764 |
+
+The distribution is Zipf-like and clearly non-uniform: at n=3, **2.64% of
+distinct n-grams carry half of all occurrences**, and the single most common
+3-gram appears 1,924 times. Larger n flattens it — normalised entropy rises
+from 0.82 to 0.88 and the top-100 share falls from 19.07% to 10.60% — but never
+approaches uniform, and the tail grows correspondingly heavier: at n=5 half of
+all distinct n-grams occur exactly once.
+
+Both ends of that distribution are informative to an observer. Frequent n-grams
+make access patterns predictable; hapax n-grams are near-unique identifiers of
+the specific line that contains them. This is the same structural weakness the
+Test 4 frequency analysis found in deterministic OPRF tokens, reappearing at
+the token level.
+
+**This is a distributional measurement, not an attack.** Skew is a necessary
+condition for a frequency attack, not a demonstration of one. No inference was
+run, and unlike Test 4 no observation count for recovering anything is claimed
+here. Anyone quoting this section should quote the distribution, not a
+capability.
+
+### 4. False positives
+
+Primary result, restricted to patterns whose target field is CommandLine-like,
+matching the input corpus:
+
+| n | Filter positives | True positives | False positives | Precision |
+|---:|---:|---:|---:|---:|
+| 3 | 60,710 | 54,859 | 5,851 | 90.36% |
+| 4 | 45,397 | 41,825 | 3,572 | 92.13% |
+| 5 | 30,445 | 28,772 | 1,673 | 94.50% |
+
+The aggregate hides the real structure. Split by anchoring:
+
+| n | `contains` precision | `contains` FP | Anchored precision | Anchored FP |
+|---:|---:|---:|---:|---:|
+| 3 | 97.47% | 1,403 | 16.04% | 4,448 |
+| 4 | 98.91% | 454 | 16.99% | 3,118 |
+| 5 | 99.12% | 251 | 21.95% | 1,422 |
+
+**For unanchored `contains`, the set model works well**: 99.12% precision at
+n=5, with completeness guaranteed. **For anchored patterns it fails**, at
+16–22% precision, because an unordered set discards position entirely — knowing
+that every n-gram of `\system` occurs somewhere in a line says almost nothing
+about whether the line ends with it. Anchored patterns are only 2,472 of 14,726
+unique patterns but produce the majority of all false positives.
+
+That failure is a modelling artifact rather than a fundamental limit, and it is
+cheap to fix: position-tagging the terminal n-gram of an anchored pattern
+restores the anchor at no change to index size. This is the concrete reason the
+two kinds were separated rather than pooled — pooled, the headline precision
+would read 90.36% at n=3 and would have misattributed an addressable design
+flaw to the technique itself.
+
+Against the full pattern set including path-targeted fields such as `Image`,
+precision is lower — 83.74%, 85.19%, and 88.49% at n=3, 4, and 5 — but that
+comparison applies patterns to a field type they were not written for, so the
+CommandLine-restricted figures above are the meaningful ones.
+
+### Interpretation and limits
+
+Answering the question directly: **yes for unanchored substring search, at a
+real price.** The price is roughly one stored token per character of every
+indexed field, 17–27% of the pattern set becoming inexpressible depending on n,
+and an n-gram frequency distribution far from uniform. Anchored search needs
+position tagging, without which it is unusable.
+
+The choice of n is a genuine tension rather than a tuning detail. Larger n
+gives better precision (97.47% → 99.12%) and flatter frequency leakage
+(normalised entropy 0.82 → 0.88), but costs more inexpressible patterns
+(17.15% → 26.63%) and a heavier unique-token tail (35.53% → 50.95% hapax). No
+value of n is good at all four at once, and index size barely moves.
+
+Three limits bound these numbers:
+
+1. **The false-positive rate is not general.** Atomic Red Team is a corpus of
+   attack commands, not benign background traffic. The precision figures
+   describe the filter's behaviour on 6,110 attack-like command lines. The
+   number that would decide a deployment — precision against production volumes
+   of benign command lines, where true positives are rare and the FP term
+   dominates — is not measured here and is likely to be materially worse,
+   because precision falls as the true-positive base rate falls.
+2. **The skew figures describe this corpus.** A different command-line
+   population would produce a different distribution; the Zipf-like shape is
+   expected to be robust, the specific percentages are not.
+3. **Static and unweighted, inherited from Test 5.** Patterns count once each
+   regardless of how often their rule fires.
+
+For ADAM: this establishes that the substring-matching majority of detection
+content identified in Test 5 is expressible as a set operation, so the barrier
+is not expressiveness. The barrier is per-field token inflation and a token
+frequency distribution that leaks structure — the same problem class as the
+Test 4 OPRF frequency result, at a finer granularity.
+
+### Reproduce
+
+```sh
+git clone --depth 1 https://github.com/SigmaHQ/sigma.git /tmp/sigma
+git clone --depth 1 https://github.com/redcanaryco/atomic-red-team.git /tmp/art
+python3 analysis/ngram_cost.py --corpus /tmp/sigma --input-corpus /tmp/art
+```

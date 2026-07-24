@@ -305,6 +305,18 @@ def _pct(n, denominator):
     return round(100.0 * n / denominator, 4) if denominator else None
 
 
+def _slice_summaries(records):
+    """Summarise the reported slices over one corpus."""
+    by_slice = defaultdict(list)
+    for rec in records:
+        for name in rec["slices"]:
+            by_slice[name].append(rec)
+    return {
+        name: summarise(by_slice.get(name, []))
+        for name in ("process_creation", "network", "cloud")
+    }
+
+
 def collect(corpus, dirs):
     records, errors = [], []
     for d in dirs:
@@ -341,16 +353,10 @@ def main():
         "corpus": str(args.corpus),
         "supported": summarise(supported),
         "unsupported": summarise(unsupported),
-        "slices": {},
+        "slices": _slice_summaries(supported),
+        "unsupported_slices": _slice_summaries(unsupported),
         "errors": errors + unsup_errors,
     }
-
-    by_slice = defaultdict(list)
-    for rec in supported:
-        for name in rec["slices"]:
-            by_slice[name].append(rec)
-    for name in ("process_creation", "network", "cloud"):
-        result["slices"][name] = summarise(by_slice.get(name, []))
 
     print(json.dumps(result, indent=2))
     if args.json:

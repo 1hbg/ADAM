@@ -121,17 +121,32 @@ def build_stream(lines, events, hosts, dests, rng):
     cardinalities are parameters, because the compression ratio depends on them
     and no public source fixes them.
     """
-    def zipf_pick(n, s=1.0):
-        # Precomputed cumulative weights, sampled per call.
-        return rng.choices(range(n), weights=zipf_pick.cache.setdefault(
-            (n, s), [1.0 / ((i + 1) ** s) for i in range(n)]))[0]
-    zipf_pick.cache = {}
+    # Sample from a precomputed CDF by bisection. `random.choices` re-derives
+    # the cumulative weights on every call, which makes stream construction
+    # quadratic in the entity cardinality and is unusable at these sizes.
+    import bisect
+    from itertools import accumulate
+
+    def cdf(n, s=1.0):
+        c = list(accumulate(1.0 / ((i + 1) ** s) for i in range(n)))
+        total = c[-1]
+        return [x / total for x in c]
+
+    cdfs = {
+        "hosts": cdf(hosts),
+        "lines": cdf(len(lines)),
+        "dests": cdf(dests),
+    }
+
+    def pick(which):
+        return bisect.bisect_left(cdfs[which], rng.random())
 
     stream = []
     for _ in range(events):
-        h = f"host-{zipf_pick(hosts)}"
-        c = lines[zipf_pick(len(lines))]
-        d = f"198.51.{zipf_pick(dests) // 256}.{zipf_pick(dests) % 256}"
+        h = f"host-{pick('hosts')}"
+        c = lines[pick('lines')]
+        d_idx = pick("dests")
+        d = f"198.51.{d_idx // 256}.{d_idx % 256}"
         stream.append((h, c, d))
     return stream
 

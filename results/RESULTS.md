@@ -1487,3 +1487,147 @@ those.**
 cargo run --release -p khprf-bench -- \
   --derive 200000 --rotate 10000,100000,1000000,10000000 --repetitions 5
 ```
+
+## Test 12: compression before cryptography
+
+Tests 1 and 2B measured MORSE HSS at 19.483 ms and 1,920 protocol bytes per
+comparison, linear in the number of values. That makes the *number of values
+entering the cryptography* the dominant cost lever — larger than any
+constant-factor tuning of the primitive. Sketches attack exactly that: their
+size does not depend on how many distinct keys exist, so if the aggregation an
+analyst needs can be answered from the sketch, only the sketch enters HSS.
+
+This measures the trade. No cryptography is involved; both sketches are
+textbook implementations written for measurement.
+
+### Method
+
+200,000 synthetic events, each `(host, command line, destination)`. Command
+lines come from the public Atomic Red Team corpus; **entity cardinalities and
+the Zipf skew are modelling assumptions**, and the compression ratio depends
+directly on them, so results are reported against cardinality rather than as a
+single number. Count-Min uses depth 4; HyperLogLog uses 8-bit registers.
+Compression ratio is distinct keys divided by sketch cells — the ratio of
+values that would have to enter HSS.
+
+### Count-Min: it does not compress here
+
+| Field | Distinct keys | Width | Cells | Compression | Median rel. error | Exact estimates | Heavy-hitter recall | HH precision |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| destination | 28,679 | 256 | 1,024 | 28.01x | 21850.0% | 0.0% | 100.0% | 0.2946% |
+| destination | 28,679 | 1,024 | 4,096 | 7.002x | 3750.0% | 0.0% | 100.0% | 53.1646% |
+| destination | 28,679 | 4,096 | 16,384 | 1.75x | 500.0% | 0.408% | 100.0% | 92.3077% |
+| destination | 28,679 | 16,384 | 65,536 | 0.4376x | 0.0% | 53.52% | 100.0% | 100.0% |
+| destination | 28,679 | 65,536 | 262,144 | 0.1094x | 0.0% | 98.3333% | 100.0% | 100.0% |
+| command_line | 4,852 | 256 | 1,024 | 4.738x | 2300.0% | 0.0% | 100.0% | 3.056% |
+| command_line | 4,852 | 1,024 | 4,096 | 1.185x | 248.0% | 3.5449% | 100.0% | 80.597% |
+| command_line | 4,852 | 4,096 | 16,384 | 0.2961x | 0.0% | 76.7312% | 100.0% | 100.0% |
+| command_line | 4,852 | 16,384 | 65,536 | 0.074x | 0.0% | 99.4847% | 100.0% | 100.0% |
+| command_line | 4,852 | 65,536 | 262,144 | 0.0185x | 0.0% | 100.0% | 100.0% | 100.0% |
+| host | 4,986 | 256 | 1,024 | 4.869x | 2378.5714% | 0.0% | 100.0% | 2.9652% |
+| host | 4,986 | 1,024 | 4,096 | 1.217x | 260.0% | 3.3293% | 100.0% | 76.7606% |
+| host | 4,986 | 4,096 | 16,384 | 0.3043x | 0.0% | 76.5744% | 100.0% | 98.1982% |
+| host | 4,986 | 16,384 | 65,536 | 0.0761x | 0.0% | 99.3783% | 100.0% | 100.0% |
+| host | 4,986 | 65,536 | 262,144 | 0.019x | 0.0% | 100.0% | 100.0% | 100.0% |
+
+**At every width where per-key counts are usable, the sketch is larger than
+exact storage.** Destinations reach 98.3% exact estimates only at width 65,536
+— 262,144 cells against 28,679 distinct keys, a compression ratio of 0.11x.
+The sketch expands the problem by nine times.
+
+The reason is arithmetic and exact. Count-Min's additive error is about `N/w`,
+which depends on the *event count*, not on the key count, while its size is
+`w x d`. Getting the error below the mean per-key count therefore requires
+
+    w > N / mean_count = distinct_keys
+
+so the sketch must be at least as wide as the key space it is summarising:
+
+| Field | Events | Distinct | Mean count/key | Width needed for error below mean |
+|---|---:|---:|---:|---:|
+| destination | 200,000 | 28,679 | 6.97 | 28,679 |
+| command_line | 200,000 | 4,852 | 41.22 | 4,852 |
+| host | 200,000 | 4,986 | 40.11 | 4,986 |
+
+This is not a defect in the implementation — it is what Count-Min is for.
+It compresses streams with *many events over few hot keys*. This stream has the
+opposite shape: 200,000 events over 28,679 destinations, a mean of 7.0
+observations per key. Security telemetry with high-cardinality, thin-tailed
+fields is the case Count-Min handles worst.
+
+**Heavy hitters are the exception.** Recall is 100% at every width, because
+Count-Min only overestimates and so never drops a true heavy hitter. Precision
+is what degrades: at width 4,096 destinations give 92.3% precision at 1.75x
+compression; at width 1,024, 53.2% precision at 7.0x. If the question is "which
+destinations are hot" rather than "how many times did each appear", a modest
+compression is available at a real false-positive cost.
+
+### HyperLogLog: it does compress
+
+| Field | True distinct | p | Registers | Compression | Mean absolute error | Theoretical 1.04/sqrt(m) |
+|---|---:|---:|---:|---:|---:|---:|
+| destination | 28,679 | 8 | 256 | 112x | 3.7635% | 6.5% |
+| destination | 28,679 | 10 | 1,024 | 28.01x | 2.7683% | 3.25% |
+| destination | 28,679 | 12 | 4,096 | 7.002x | 1.3467% | 1.625% |
+| destination | 28,679 | 14 | 16,384 | 1.75x | 0.5089% | 0.8125% |
+| command_line | 4,852 | 8 | 256 | 18.95x | 5.7705% | 6.5% |
+| command_line | 4,852 | 10 | 1,024 | 4.738x | 2.8035% | 3.25% |
+| command_line | 4,852 | 12 | 4,096 | 1.185x | 1.2064% | 1.625% |
+| command_line | 4,852 | 14 | 16,384 | 0.2961x | 0.652% | 0.8125% |
+| host | 4,986 | 8 | 256 | 19.48x | 4.1323% | 6.5% |
+| host | 4,986 | 10 | 1,024 | 4.869x | 2.2004% | 3.25% |
+| host | 4,986 | 12 | 4,096 | 1.217x | 0.7592% | 1.625% |
+| host | 4,986 | 14 | 16,384 | 0.3043x | 0.521% | 0.8125% |
+
+Measured error tracks the theoretical `1.04/sqrt(m)` and is consistently a
+little better than it. For distinct-count questions the compression is real:
+**28x at 2.77% error** for destinations at p=10, or 112x at 3.76% error at
+p=8, from 1 KiB and 256 B of registers respectively. Five trials per point.
+
+### The catch, and it is the finding that matters
+
+The two results point in opposite directions once the sketch has to survive
+HSS, because the sketches differ in the operation their *merge* needs:
+
+| Sketch | Merge operation | Under additive HSS | Query operation |
+|---|---|---|---|
+| Count-Min | elementwise addition | free — this is the operation HSS is built on | min over d cells, so d-1 comparisons |
+| HyperLogLog | elementwise maximum | one comparison per register | harmonic mean over m registers |
+
+**The sketch that compresses is the one HSS cannot cheaply merge, and the
+sketch HSS likes is the one that does not compress at these cardinalities.**
+Merging two 1,024-register HyperLogLogs under HSS needs 1,024 comparisons —
+at the Test 1 figure of 19.483 ms that is 19.9 seconds and 1.97 MB per merge,
+which erases the benefit of having compressed 28,679 values into 1,024.
+Count-Min merges for free but, as measured above, has to be wider than the key
+space to say anything useful about individual keys.
+
+Count-Min's *queries* are cheap under HSS — 3 comparisons at depth 4, about
+58 ms — so a workable shape exists: additive sketches merged for free, queried
+rarely, and used only for heavy-hitter questions where 1.75x–7x compression
+buys 92%–53% precision. That is a much narrower claim than "sketching shrinks
+telemetry before HSS".
+
+### Limits
+
+1. **The stream is synthetic and the ratio depends on it entirely.** Entity
+   cardinalities and skew are assumptions. At a genuinely high-cardinality
+   field — millions of distinct destinations against the same event count —
+   Count-Min's compression ratio would rise proportionally, and the negative
+   result above would flip. Nothing here shows Count-Min is unsuitable in
+   general, only that it is unsuitable at the mean-count-per-key this stream
+   has.
+2. **One event volume (200,000) and one depth (4).** Count-Min error is driven
+   by `N/w`; a different N moves every row.
+3. **The HSS cost figures are transplanted, not re-measured.** They come from
+   Tests 1 and 2B on different hardware, and are used as a per-comparison unit
+   cost rather than as a measurement of sketch merging, which was not
+   implemented under HSS.
+4. Textbook sketch implementations; no bias correction beyond HyperLogLog's
+   small-range linear counting, and no sparse representation.
+
+### Reproduce
+
+```sh
+python3 analysis/sketch_compression.py --input-corpus /tmp/art --events 200000
+```

@@ -1079,3 +1079,155 @@ Test 9 measures what removing it costs.
 git clone --depth 1 https://github.com/redcanaryco/atomic-red-team.git /tmp/art
 python3 analysis/freq_attack.py --input-corpus /tmp/art --zipf 0.8 1.0 1.2
 ```
+
+
+## Test 9: the mitigation curve
+
+Test 8 leaves two things to take back: linkage, which is unconditional, and
+identification, which the informed attacker gets. This measures what removing
+them costs, as a curve rather than a point.
+
+### Method
+
+Same corpus, population and synthetic Zipf(1.0) frequency model as Test 8, at
+n=4, with 10,000 observations per attack and 10 trials per point. Two defences:
+
+- **Size padding (B)** — pad every token set up to the next multiple of B with
+  dummy tokens unique to that record.
+- **Frequency padding (r)** — inject decoy tokens whose document-frequency
+  profile is drawn from the real one, so they interleave with real tokens in
+  the attacker's ranking. `r` is extra stored tokens as a fraction of the
+  unpadded index.
+
+The attacker is assumed to know the defence but not the secret padding
+(Kerckhoffs), which decides what she can still rule out by observed size:
+
+| Index | What the attacker infers from an observed size S |
+|---|---|
+| unpadded | the exact n-gram set size |
+| size padding B | the lines that would pad to exactly S |
+| frequency padding | padding count has known mean and spread, so the true size lies in a mean ± 2 sd window |
+
+An earlier draft scored frequency padding against the weaker "true size ≤ S"
+bound. That flattered it substantially — under the correct window model its
+advantage over size padding disappears. Cost is stored tokens relative to the
+unpadded index.
+
+### The curve
+
+| Defence | Cost | Median candidates | Uninformed (traffic) | Informed (traffic) | Informed (distinct) | Normalised entropy |
+|---|---:|---:|---:|---:|---:|---:|
+| none (Test 8 baseline) | 1.0x | 41 | 8.133% | 49.961% | 28.3604% | 0.8635 |
+| size padding B=8 | 1.0538x | 355 | 1.498% | 35.137% | 6.9555% | 0.861 |
+| size padding B=16 | 1.1153x | 735 | 0.572% | 32.117% | 4.643% | 0.8621 |
+| size padding B=32 | 1.2414x | 1,276 | 0.316% | 17.968% | 2.1608% | 0.8692 |
+| size padding B=64 | 1.5017x | 2,870 | 0.15% | 4.141% | 0.6995% | 0.887 |
+| size padding B=128 | 2.1602x | 4,421 | 0.134% | 0.32% | 0.2767% | 0.9197 |
+| size padding B=256 | 3.9686x | 4,814 | 0.058% | 0.101% | 0.2211% | 0.9568 |
+| frequency padding r=0.25 | 1.25x | 650 | 0.384% | 20.104% | 1.0646% | 0.8656 |
+| frequency padding r=0.5 | 1.5x | 903 | 0.297% | 5.556% | 0.6411% | 0.8656 |
+| frequency padding r=1.0 | 2.0x | 1,297 | 0.115% | 0.452% | 0.4276% | 0.8717 |
+| frequency padding r=2.0 | 3.0x | 1,716 | 0.186% | 0.126% | 0.2423% | 0.8746 |
+| frequency padding r=4.0 | 5.0x | 2,251 | 0.056% | 5.652% | 0.2301% | 0.8814 |
+
+"Median candidates" counts per *record*, so it reads 41 at baseline where Test 8
+reported 13. Test 8's figure was the median size *bucket*; records concentrate
+in the larger buckets, so the median record faces more candidates than the
+median bucket holds. Both are correct; they answer different questions.
+
+### The traffic metric is unstable in the padded regime
+
+Ten trials per point turned out not to be enough, and the writeup keeps the
+evidence rather than quietly re-running until it looked smooth. A 40-trial
+re-run of the frequency-padding points:
+
+| r | Informed traffic, 10 trials | Informed traffic, 40 trials | Informed distinct, 40 trials |
+|---:|---:|---:|---:|
+| 1.0 | 0.452% | 8.259% | 0.3963% |
+| 2.0 | 0.126% | 0.1182% | 0.2586% |
+| 4.0 | 5.652% | 2.4325% | 0.2228% |
+
+The traffic figure for r=1.0 moves from 0.452% to 8.259% between runs, and
+remains non-monotonic at 40 trials (8.26 → 0.12 → 2.43). The distinct-line
+figure does not: it falls monotonically, 0.396% → 0.259% → 0.223%.
+
+The cause is structural, not a bug. Under Zipf(1.0) over 4,839 lines the single
+most frequent line carries **11.04%** of all traffic, the top three carry
+20.2%, and the top ten carry 32.3%. Once a defence pushes identification down
+into the low single digits, the traffic metric is decided by whether a handful
+of specific lines happened to be caught in that trial — so its variance is
+largest exactly where the defence is working. The baseline is not affected:
+measured twice independently it gave 50.73% (Test 8, 20 trials) and 49.96%
+(Test 9, 10 trials), and the uninformed baseline 8.15% against 8.13%.
+
+**Read the distinct column, not the traffic column, for the padded rows.** The
+traffic column is sound at baseline and unreliable once identification is
+small. The size-padding rows were not re-run at 40 trials, so they carry the
+same caveat.
+
+### Reading the curve
+
+**Roughly 1.5x the index buys about an order of magnitude**, and **roughly 2x
+buys two.** On the informed-distinct measure, identification falls from 28.36%
+at baseline to 1.36% at size padding B=64 (cost 1.50x) and 0.19% at B=128
+(cost 2.16x).
+
+**The two defences are close once the attacker model is fair.** At matched cost
+they land within about a percentage point of each other on the distinct
+measure. There is no cheap win hiding in the choice between them.
+
+**Distributional flattening lags operational protection.** Normalised entropy
+moves only from 0.8635 to 0.9568 across the whole size-padding range while
+identification falls by two orders of magnitude. Entropy is the wrong quantity
+to tune against: it moves slowly and understates what padding achieves.
+
+**Padding does not remove linkage.** Every row still carries the Test 8 linkage
+result. Records padded with per-record-unique dummies stay byte-identical
+across repeated executions as long as the padding is deterministic per record;
+re-randomising it per write breaks linkage but also breaks the equality lookup
+the index exists for. No point on this curve resolves that tension — epoch
+rotation (Tests 10 and 11) is the lever that addresses it instead.
+
+### Cheaper measures that are not on this curve
+
+**Position tagging** costs essentially nothing and is not a leakage defence.
+Tagging the terminal n-gram of an anchored pattern fixes the Test 7 result that
+anchored matching runs at 16–22% precision under a plain set model, without
+changing index size. It belongs in any deployment, but it addresses
+correctness, not what Test 8 measured. Conflating the two would be the easy
+mistake here.
+
+**Property-preserving hashing** (Zhao, arXiv:2503.17844, building on
+Fleischhacker–Larsen–Simkin, EUROCRYPT 2022) is a different primitive rather
+than a cheaper version of this one, and does not substitute:
+
+- It preserves *Hamming distance between two hashed vectors of equal length*.
+  Tests 7–9 need substring containment against a corpus. Different predicate,
+  and the construction offers no containment query.
+- Its indistinguishability is stated against input distributions with
+  min-entropy at least the security parameter. The Test 8 threat model is a
+  public 4,840-line command dictionary, which has nothing like that entropy, so
+  the guarantee does not cover the attack that actually works here.
+- Its hash is randomised, so it would not leak the unconditional linkage Test 8
+  found — but precisely because equal inputs stop producing equal hashes, which
+  is the property a deterministic search index is built on.
+
+The honest comparison is that PPH trades away the equality structure this index
+depends on. Worth tracking for similarity-search workloads; not a drop-in
+mitigation for the leakage measured here.
+
+### Limits
+
+Inherited from Test 8: synthetic frequency model, public attack corpus, and one
+specific frequency attack rather than the strongest available. Because that
+attack is a lower bound on leakage, **the mitigation figures are correspondingly
+optimistic** — reducing this attacker to 0.2% has not been shown to reduce a
+stronger attacker to 0.2%. Single n (n=4), single observation count (10,000),
+single skew (s=1.0), and 10 trials per point on the main table.
+
+### Reproduce
+
+```sh
+python3 analysis/mitigation.py --input-corpus /tmp/art --n 4 \
+  --trials 10 --observations 10000
+```

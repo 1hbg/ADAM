@@ -172,6 +172,50 @@ def identify(pop, observed, token_map, by_size):
     return correct_distinct, weighted_correct, total_weight
 
 
+def build_gram_index(pop):
+    """gram -> dictionary line indices, for the fast identifier."""
+    index = defaultdict(list)
+    for i, gs in enumerate(pop["gram_sets"]):
+        for g in gs:
+            index[g].append(i)
+    return index
+
+
+def identify_fast(pop, observed, token_map, by_size, gram_index):
+    """Same result as identify(), but scored through an inverted index.
+
+    Padding (Test 9) makes size buckets large, at which point scanning every
+    candidate per record is the bottleneck. Overlap is sparse, so accumulating
+    through posting lists is much cheaper. Candidate iteration order and the
+    strict-greater tie-break are kept identical to identify() so the two agree
+    exactly; `test_identify_equivalence` asserts it.
+    """
+    correct_distinct = weighted_correct = total_weight = 0
+    for tokens, (truth, weight) in observed.items():
+        total_weight += weight
+        candidates = by_size.get(len(tokens), ())
+        if not candidates:
+            continue
+        in_bucket = set(candidates)
+        scores = Counter()
+        for t in tokens:
+            g = token_map.get(t)
+            if g is None:
+                continue
+            for i in gram_index.get(g, ()):
+                if i in in_bucket:
+                    scores[i] += 1
+        best, best_score = None, -1
+        for idx in candidates:
+            score = scores.get(idx, 0)
+            if score > best_score:
+                best, best_score = idx, score
+        if best is not None and pop["class_of"][best] == pop["class_of"][truth]:
+            correct_distinct += 1
+            weighted_correct += weight
+    return correct_distinct, weighted_correct, total_weight
+
+
 def run_trial(pop, weights, n_obs, rng, prior, by_size):
     # Draw N observations, then fold repeats: a line seen k times contributes
     # its token set k times, so counting multiplicities first turns N set

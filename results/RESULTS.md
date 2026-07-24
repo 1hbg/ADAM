@@ -1231,3 +1231,117 @@ single skew (s=1.0), and 10 trials per point on the main table.
 python3 analysis/mitigation.py --input-corpus /tmp/art --n 4 \
   --trials 10 --observations 10000
 ```
+## Test 10: epoch length against investigative utility
+
+Tests 8 and 9 establish that deterministic tokens leak linkage unconditionally
+and that padding it away costs multiples of the index. Epoch rotation is the
+other lever: keys roll on a schedule, tokens are unlinkable across epochs, and
+leakage is bounded by the epoch rather than by the lifetime of the data. The
+cost is investigative — any analysis that must connect two events either side
+of a boundary loses that link.
+
+No cryptography is involved here; Test 11 implements and measures the rotation
+primitive itself.
+
+### Modelling choice
+
+How long a real investigation spans is not published in usable form. Incident
+response reporting gives dwell time — intrusion to detection — which is a
+different and much longer quantity than the window an analyst must correlate
+across. **The span distribution is therefore SYNTHETIC**, modelled as a
+three-component lognormal mixture because investigative work is not one
+population:
+
+| Class | Weight | Median span | sigma |
+|---|---:|---:|---:|
+| triage — single-alert enrichment, short pivot | 70% | 30 min | 1.0 |
+| incident — multi-host reconstruction | 25% | 12 h | 1.2 |
+| campaign — slow correlation | 5% | 21 d | 1.5 |
+
+Both the weights and the medians are assumptions, and the sensitivity section
+varies them. Epoch boundaries are fixed wall-clock rather than
+per-investigation, so an investigation's offset within its epoch is uniform.
+That is what makes short epochs costly even for short work: a 30-minute span
+still has a 30/60 chance of straddling an hourly boundary. Each investigation
+joins 8 events; 200,000 trials per point.
+
+### Base result
+
+| Epoch | Fully linkable | Pairwise links preserved | Mean epoch fragments |
+|---|---:|---:|---:|
+| 1h | 34.2345% | 54.9906% | 3.0368 |
+| 6h | 65.4615% | 77.0834% | 1.9627 |
+| 24h | 79.9095% | 87.6189% | 1.489 |
+| 7d | 92.284% | 95.2919% | 1.1793 |
+
+"Fully linkable" means every event of the investigation fell in one epoch.
+Pairwise is the gentler measure: the share of event pairs still joinable, which
+is what partial-credit analysis would retain.
+
+### The loss is concentrated, not spread
+
+Fully linkable, broken down by investigation class:
+
+| Epoch | Triage | Incident | Campaign |
+|---|---:|---:|---:|
+| 1h | 48.7057% | 0.8641% | 0.0% |
+| 6h | 88.3059% | 15.0628% | 0.0694% |
+| 24h | 97.0505% | 48.0975% | 0.9613% |
+| 7d | 99.607% | 87.7725% | 13.3683% |
+
+**This is the load-bearing finding of Test 10.** Rotation does not degrade
+investigative work uniformly — it removes a specific class of it. At a 24-hour
+epoch, triage survives essentially intact (97.1%) while campaign-scale
+correlation is destroyed (0.96%). Even a 7-day epoch leaves campaign work at
+13.4%. The work that rotation costs is exactly the slow, multi-week correlation
+that distinguishes a competent detection programme from an alert queue.
+
+An aggregate "80% of investigations survive at 24h" would be a misleading way
+to report this, because the surviving 80% is not a random sample of the work.
+
+### Sensitivity
+
+Fully linkable, under alternative assumptions:
+
+| Variant | 1h | 6h | 24h | 7d |
+|---|---:|---:|---:|---:|
+| heavier tail (40/40/20) | 19.952% | 41.431% | 58.248% | 77.5545% |
+| triage-dominated (90/9/1) | 43.8465% | 80.735% | 91.641% | 97.678% |
+| all medians 10x shorter | 71.2305% | 87.053% | 93.4845% | 97.616% |
+| all medians 10x longer | 1.642% | 23.1555% | 52.02% | 76.5455% |
+| 2 events per investigation | 49.111% | 73.843% | 85.486% | 94.4975% |
+| 4 events | 38.0695% | 67.6975% | 81.6055% | 92.982% |
+| 16 events | 32.492% | 64.5315% | 79.229% | 91.8705% |
+| 64 events | 31.4625% | 63.8225% | 78.7665% | 91.832% |
+
+The 1-hour column spans 1.64% to 71.23% across these assumptions. As in Test 8,
+**the assumed distribution dominates the answer**, and the span model is the
+synthetic part. A deployment must measure its own investigation spans before
+choosing an epoch from a table like this one.
+
+Two things are stable across the whole sweep. The ordering never inverts —
+longer epochs always retain more. And event count barely matters beyond about
+four (31.5% to 38.1% at 1h across 2 to 64 events): what governs survival is the
+investigation's *span* against the epoch, not how many events it joins.
+
+### Limits
+
+1. **The span model is synthetic and dominates the result.** Everything above
+   is conditional on it.
+2. **Binary linkability is optimistic about analyst behaviour and pessimistic
+   about tooling.** A real analyst may reconstruct across a boundary by other
+   means (hostnames in plaintext, timestamps, external context), which this
+   does not model; equally, a fragmented investigation may fail for reasons
+   beyond lost token linkage.
+3. **Uniform offset assumes rotation is not aligned to activity.** Aligning
+   epoch boundaries to quiet periods would improve these numbers and is not
+   modelled.
+4. No cost side: this measures only what rotation costs investigatively. Test
+   11 measures what it costs computationally.
+
+### Reproduce
+
+```sh
+python3 analysis/epoch_utility.py --trials 200000
+```
+

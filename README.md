@@ -11,7 +11,9 @@ Secret Sharing (HSS) over a 3072-bit FastPaillier modulus. Later experiments
 evaluate a real verifiable-encryption statement and threshold-OPRF
 pseudonymisation quality.
 
-All inputs are synthetic. Results, including hardware and variance, are kept in
+All benchmark inputs are synthetic. The one exception is the Test 5 corpus
+analysis, which reads the public SigmaHQ rule set; it is cloned separately and
+not vendored here. Results, including hardware and variance, are kept in
 [`results/RESULTS.md`](results/RESULTS.md).
 
 ## Scope
@@ -19,6 +21,8 @@ All inputs are synthetic. Results, including hardware and variance, are kept in
 - `crates/hss-bench`: MORSE HSS primitive and synthetic alert benchmarks
 - `crates/ve-circuit`: SP1 verifiable-encryption measurement
 - `crates/oprf-eval`: threshold-OPRF pseudonymisation measurement experiment
+- `crates/khprf-bench`: key-homomorphic PRF epoch-rotation measurement
+- `analysis/`: corpus analyses and simulations that are not primitive benchmarks
 
 Only the measurement harness is in scope. Do not use this code to protect real
 data.

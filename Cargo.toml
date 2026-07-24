@@ -6,6 +6,7 @@ members = [
     "crates/ve-circuit/program",
     "crates/ve-circuit/types",
     "crates/oprf-eval",
+    "crates/khprf-bench",
 ]
 
 [workspace.package]
